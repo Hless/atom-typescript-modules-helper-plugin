@@ -6,7 +6,20 @@ module.exports = TypescriptImport =
   modalPanel: null
   subscriptions: null
 
+  extensions: ['.ts', '.js', '.tsx', '.jsx']
+  searchPaths: null
+  fileExtensionRegex: null
+  exportPattern: /(export\s+?(default\s+?)?(?:((?:(?:abstract\s+)?class)|(?:type)|(?:interface)|(?:function(?:\s*\*)?)|(?:let)|(?:var)|(?:const)|(?:enum))\s+)?)([a-zA-z]\w*)/;
+  importPattern:  /\bimport\s+(?:({?)\s*(.+?)\s*}?\s+from\s+)?[\'"]([^"\']+)["\']/;
+  #symbolPatternNoDefault: /export\s(?!default)\s?(class|interface|namespace|enum|const|type|function)?\s*(([a-zA-Z0-9])*)/
+
   activate: (state) ->
+
+    # Initialize file type convience properties
+    @searchPaths = @extensions.map (extension) -> "**/*" + extension
+    @searchPaths.push("!**/node_modules/**");
+    @fileExtensionRegex = ///(#{@extensions.join("|")})$///
+
     # Events subscribed to in atom's system can be easily cleaned up with a CompositeDisposable
     @subscriptions = new CompositeDisposable
 
@@ -20,7 +33,9 @@ module.exports = TypescriptImport =
     #bindEvent = @bindEvent
     @sub.add(atom.workspace.observeTextEditors((editor) =>
         @bindEvent(editor)
+        # @bindOnSave(editor)
     ))
+
 
   bindEvent: (editor) ->
     # console.log('bound event')
@@ -32,6 +47,19 @@ module.exports = TypescriptImport =
       if (e.metaKey || e.ctrlKey)
         @goToDeclaration()
     )
+
+  bindOnSave: (editor) ->
+
+    editor.onDidSave((event) =>
+      if !event.path.match @fileExtensionRegex or !project.contains(event.path)
+        return
+      buffer = editor.getBuffer()
+      buffer.scan(@exportPattern, (result) => @insertExportMatchToIndex(result, event.path))
+      buffer.scan(@importPattern, (result) => @insertImportMatchToIndex(result, event.path))
+
+
+    )
+
 
 
   deactivate: ->
@@ -125,13 +153,17 @@ module.exports = TypescriptImport =
         location = symbol.path;
         defaultImport = symbol.defaultImport;
         fileFolder = path.resolve(filePath + '/..');
-        relative = path.relative(fileFolder, location).replace(/\.(jsx?|tsx?)$/, '');
-        # Replace the windows path seperator with '/'
-        if (os.platform() == 'win32')
-            relative = relative.split(path.sep).join('/');
+        if(location.indexOf("./") < 0 && location.indexOf("!") < 0 && location.indexOf("/") != 0)
+          relative = location
+        else
+          relative = path.relative(fileFolder, location).replace(/\.(jsx?|tsx?)$/, '');
+          # Replace the windows path seperator with '/'
+          if (os.platform() == 'win32')
+              relative = relative.split(path.sep).join('/');
 
-        if(!/^\./.test(relative))
-          relative = './' + relative;
+          if(!/^\./.test(relative))
+            relative = './' + relative;
+
 
         @addImportStatement(selection, relative, defaultImport)
       else
@@ -253,22 +285,41 @@ module.exports = TypescriptImport =
     sb.push(importStatement.substring(insertIndex, importStatement.length))
     return sb.join('')
 
+
+  insertExportMatchToIndex: (res, filePath) ->
+    matches = res.matchText.match(@exportPattern)
+    symbol = matches[4];
+    if(!symbol)
+      return;
+    @index[symbol] = { path: filePath, defaultImport: !!matches[2]};
+
+  insertImportMatchToIndex: (res) ->
+    matches = res.matchText.match(@importPattern)
+    symbol = matches[2];
+    if(!symbol)
+      return;
+
+    path = matches[3];
+    if(path.indexOf("./") >= 0 || path.indexOf("!") >= 0)
+      return;
+
+    @index[symbol] = { path: path, defaultImport: matches[1] != "{" };
+
+
+
   buildIndex: ->
-    index = @index;
-    searchPaths = ['**/*.ts', '**/*.js', '**/*.tsx', '**/*.jsx'];
-    symbolPattern = /export\s*default\s*(class|interface|namespace|enum|const|type|function)?\s*(([a-zA-Z0-9])*)/
-    atom.workspace.scan(symbolPattern, { paths: searchPaths }, (result) ->
-        for res in result.matches
-          rawSymbol = res.matchText
-          symbol = rawSymbol.match(symbolPattern)[2];
-          index[symbol] = { path: result.filePath, defaultImport: true };
-      );
-    symbolPatternNoDefault = /export *(class|interface|namespace|enum|const|type|function)?\s*(([a-zA-Z0-9])*)/
-    atom.workspace.scan(symbolPatternNoDefault, { paths: searchPaths }, (result) ->
-        for res in result.matches
-          rawSymbol = res.matchText
-          symbol = rawSymbol.match(symbolPatternNoDefault)[2];
-          index[symbol] = { path: result.filePath, defaultImport: false };
-      );
+
+    atom.workspace.scan(@exportPattern, { paths: @searchPaths }, (result) =>
+      for res in result.matches
+        @insertExportMatchToIndex(res, result.filePath)
+    )
+
+    atom.workspace.scan(@importPattern, { paths: @searchPaths }, (result) =>
+      for res in result.matches
+        @insertImportMatchToIndex(res)
+    )
+
+    #atom.workspace.scan(@symbolPatternNoDefault, { paths: @searchPaths }, processMatches(false))
+
   getIndex: ->
     @index
